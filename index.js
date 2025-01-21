@@ -1,12 +1,23 @@
 // require
-
 const express = require('express');
 const cors = require('cors');
+require('dotenv').config();
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
+const { Readable } = require('stream');
 
-const port = process.env.PORT || 4000;
+const port = 4000;
+
+// Cloudinary configuration
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Use memory storage instead of disk storage
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 // middleware
 const app = express();
@@ -69,43 +80,59 @@ let emailTemplate = `
 </html>
 `;
 
-// Serve static files from 'uploads' directory
-app.use('/uploads', express.static('uploads')); // Add this line
+// Modified function to handle buffer instead of file path
+const uploadToCloudinary = (buffer) => {
+    return new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+            {
+                folder: 'email-builder',
+                resource_type: 'auto'
+            },
+            (error, result) => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve(result);
+                }
+            }
+        );
 
-// Make sure uploads directory exists
-
-if (!fs.existsSync('./uploads')) {
-    fs.mkdirSync('./uploads');
-}
-
-// upload image
-const storage = multer.diskStorage({
-    destination: './uploads',
-    filename: (req, file, cb) => {
-        cb(null, Date.now() + path.extname(file.originalname));
-    }
-})
-
-const upload = multer({ storage });
-
-
+        const bufferStream = new Readable();
+        bufferStream.push(buffer);
+        bufferStream.push(null);
+        bufferStream.pipe(uploadStream);
+    });
+};
 
 // api
 app.get('/', (req, res) => {
     res.send('Hello World');
 });
 
-// image post method
-app.post('/api/uploadImage', upload.single('image'), (req, res) => {
-    if (req.file) {
-        res.json({ imageUrl: `http://localhost:4000/uploads/${req.file.filename}` });
-    } else {
-        res.status(400).json({ error: 'No file uploaded' });
-    }
-});
-
 app.get('/api/getEmailLayout', (req, res) => {
     res.json({ layout: emailTemplate });
+});
+
+// Modified upload endpoint to handle buffer
+app.post('/api/uploadImage', upload.single('image'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+
+        const result = await uploadToCloudinary(req.file.buffer);
+
+        res.json({
+            imageUrl: result.secure_url,
+            publicId: result.public_id
+        });
+    } catch (error) {
+        console.error('Upload error:', error);
+        res.status(500).json({
+            error: 'Error uploading file',
+            details: error.message
+        });
+    }
 });
 
 app.post('/api/updateConfig', (req, res) => {
@@ -117,7 +144,6 @@ app.post('/api/updateConfig', (req, res) => {
         contentSettings
     } = req.body;
 
-    // Create HTML with updated content and styles
     const updatedHtml = emailTemplate
         .replace('{{logoUrl}}', logoUrl || '')
         .replace('{{title}}', title || '')
@@ -135,9 +161,11 @@ app.post('/api/updateConfig', (req, res) => {
 });
 
 app.post('/api/renderAndDownloadTemplate', (req, res) => {
-    const { title, body, logoUrl, titleSettings, contentSettings } = req.body
+    const { title, body, logoUrl, titleSettings, contentSettings } = req.body;
 
-    const renderedHtml = emailTemplate.replace('{{logoUrl}}', logoUrl || '').replace('{{title}}', title || '')
+    const renderedHtml = emailTemplate
+        .replace('{{logoUrl}}', logoUrl || '')
+        .replace('{{title}}', title || '')
         .replace('{{body}}', body || '')
         .replace('{{titleColor}}', titleSettings.color)
         .replace('{{titleFontSize}}', titleSettings.fontSize)
@@ -150,10 +178,7 @@ app.post('/api/renderAndDownloadTemplate', (req, res) => {
 
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('Content-Disposition', 'attachment; filename=emailTemplate.html');
-
-
     res.send(renderedHtml);
-})
-
+});
 
 app.listen(port, () => { console.log(`Server is running on port ${port}`) });
